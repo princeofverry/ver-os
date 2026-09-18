@@ -116,6 +116,16 @@ impl Writer {
         self.color_code = ColorCode::new(foreground, background);
     }
 
+    pub fn write_string_at(&mut self, row: usize, mut col: usize, s: &str) {
+        for byte in s.bytes() {
+            if row >= BUFFER_HEIGHT || col >= BUFFER_WIDTH { break; }
+            self.buffer.chars[row][col].write(ScreenChar {
+                ascii_character: byte,
+                color_code: self.color_code,
+            });
+            col += 1;
+        }
+    }
     pub fn backspace(&mut self) {
         if self.column_position > 0 {
             self.column_position -= 1;

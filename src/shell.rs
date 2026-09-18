@@ -3,26 +3,42 @@ use crate::{print, println, calculator, interrupts};
 use x86_64::instructions::port::Port;
 use crate::vga_buffer::Color;
 
-fn read_char() -> char {
-    loop {
-        let mut status_port = Port::<u8>::new(0x64);
-        let status = unsafe { status_port.read() };
-        if status & 1 != 0 {
-            let mut data_port = Port::<u8>::new(0x60);
-            let scancode = unsafe { data_port.read() };
-            let mut keyboard = interrupts::KEYBOARD.lock();
-            if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
-                if let Some(key) = keyboard.process_keyevent(key_event) {
-                    match key {
-                        pc_keyboard::DecodedKey::Unicode(character) => return character,
-                        pc_keyboard::DecodedKey::RawKey(k) => {
-                            if matches!(k, pc_keyboard::KeyCode::Backspace) {
-                                return '\x08';
-                            }
+pub struct File {
+    pub name: String,
+    pub content: String,
+}
+
+lazy_static::lazy_static! {
+    pub static ref VFS: spin::Mutex<alloc::vec::Vec<File>> = spin::Mutex::new(alloc::vec::Vec::new());
+}
+
+fn try_read_char() -> Option<char> {
+    let mut status_port = Port::<u8>::new(0x64);
+    let status = unsafe { status_port.read() };
+    if status & 1 != 0 {
+        let mut data_port = Port::<u8>::new(0x60);
+        let scancode = unsafe { data_port.read() };
+        let mut keyboard = interrupts::KEYBOARD.lock();
+        if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
+            if let Some(key) = keyboard.process_keyevent(key_event) {
+                match key {
+                    pc_keyboard::DecodedKey::Unicode(character) => return Some(character),
+                    pc_keyboard::DecodedKey::RawKey(k) => {
+                        if matches!(k, pc_keyboard::KeyCode::Backspace) {
+                            return Some('\x08');
                         }
                     }
                 }
             }
+        }
+    }
+    None
+}
+
+fn read_char() -> char {
+    loop {
+        if let Some(c) = try_read_char() {
+            return c;
         }
         core::hint::spin_loop();
     }
@@ -77,13 +93,19 @@ fn process_command(cmd: &str) {
             println!("  info      - Show system info");
             println!("  mem       - Show memory info");
             println!("  time      - Show uptime ticks");
+            println!("  top       - Live dynamic system monitor (RTC, Mem)");
+            println!("  clock     - Show real-time clock (RTC)");
             println!("  calc ...  - Evaluate arithmetic expression");
-            println!("  reboot    - Reboot the system");
+            println!("  ls        - List RAM disk files");
+            println!("  touch ... - Create empty file");
+            println!("  cat ...   - Read file content");
+            println!("  write ... - Append to file (write <name> <content>)");
+            println!("  rm ...    - Delete file");
             println!("  color ... - Change theme (matrix, ocean, default)");
             println!("  guess     - Play number guessing game");
             println!("  tictactoe - Play Tic-Tac-Toe");
-            println!("  clock     - Show real-time clock (RTC)");
             println!("  cpuinfo   - Show CPU Vendor String");
+            println!("  reboot    - Reboot the system");
         }
         "clear" => {
             crate::vga_buffer::WRITER.lock().clear_screen();
@@ -120,13 +142,75 @@ fn process_command(cmd: &str) {
             }
             writer.clear_screen();
         }
+        "ls" => {
+            let vfs = VFS.lock();
+            if vfs.is_empty() {
+                println!("RAM Disk is empty.");
+            } else {
+                for file in vfs.iter() {
+                    print!("{}  ", file.name);
+                }
+                println!();
+            }
+        }
+        "touch" => {
+            if args.is_empty() { println!("Usage: touch <filename>"); }
+            else {
+                let mut vfs = VFS.lock();
+                if vfs.iter().any(|f| f.name == args) {
+                    println!("File '{}' already exists.", args);
+                } else {
+                    vfs.push(File { name: String::from(args), content: String::new() });
+                    println!("Created '{}'.", args);
+                }
+            }
+        }
+        "cat" => {
+            if args.is_empty() { println!("Usage: cat <filename>"); }
+            else {
+                let vfs = VFS.lock();
+                if let Some(file) = vfs.iter().find(|f| f.name == args) {
+                    println!("{}", file.content);
+                } else {
+                    println!("File not found.");
+                }
+            }
+        }
+        "write" => {
+            let mut split = args.splitn(2, ' ');
+            let name = split.next().unwrap_or("");
+            let content = split.next().unwrap_or("");
+            if name.is_empty() || content.is_empty() {
+                println!("Usage: write <filename> <content>");
+            } else {
+                let mut vfs = VFS.lock();
+                if let Some(file) = vfs.iter_mut().find(|f| f.name == name) {
+                    file.content.push_str(content);
+                    file.content.push('\n');
+                    println!("Written to '{}'.", name);
+                } else {
+                    println!("File not found.");
+                }
+            }
+        }
+        "rm" => {
+            if args.is_empty() { println!("Usage: rm <filename>"); }
+            else {
+                let mut vfs = VFS.lock();
+                let len_before = vfs.len();
+                vfs.retain(|f| f.name != args);
+                if vfs.len() < len_before {
+                    println!("Deleted '{}'.", args);
+                } else {
+                    println!("File not found.");
+                }
+            }
+        }
         "guess" => {
             println!("Guess the number (1-100)!");
-            // Pseudo-random based on ticks (since we don't have a real RNG)
             let ticks = interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
             let mut target = (ticks % 100) as i64 + 1;
-            if target == 1 { target = 42; } // Fallback if ticks is 0
-            
+            if target == 1 { target = 42; }
             loop {
                 print!("Guess: ");
                 let line = read_line();
@@ -150,14 +234,12 @@ fn process_command(cmd: &str) {
                 println!(" {} | {} | {} ", board[3], board[4], board[5]);
                 println!("---+---+---");
                 println!(" {} | {} | {} ", board[6], board[7], board[8]);
-                
                 print!("Player {}: ", turn);
                 let line = read_line();
                 if line.trim() == "quit" { break; }
                 if let Ok(idx) = line.trim().parse::<usize>() {
                     if idx >= 1 && idx <= 9 && board[idx-1] == ' ' {
                         board[idx-1] = turn;
-                        // check win
                         let wins = [[0,1,2],[3,4,5],[6,7,8],[0,3,6],[1,4,7],[2,5,8],[0,4,8],[2,4,6]];
                         let mut won = false;
                         for w in wins.iter() {
@@ -177,6 +259,48 @@ fn process_command(cmd: &str) {
                 }
             }
         }
+        "top" => {
+            crate::vga_buffer::WRITER.lock().clear_screen();
+            loop {
+                let mut addr_port = Port::<u8>::new(0x70);
+                let mut data_port = Port::<u8>::new(0x71);
+                let (h, m, s) = unsafe {
+                    addr_port.write(0x04); let h = data_port.read();
+                    addr_port.write(0x02); let m = data_port.read();
+                    addr_port.write(0x00); let s = data_port.read();
+                    let h = (h & 0x0F) + ((h >> 4) * 10);
+                    let m = (m & 0x0F) + ((m >> 4) * 10);
+                    let s = (s & 0x0F) + ((s >> 4) * 10);
+                    (h, m, s)
+                };
+                let used = crate::allocator::HEAP_SIZE - crate::allocator::ALLOCATOR.lock().free();
+                let ticks = interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
+                
+                let mut writer = crate::vga_buffer::WRITER.lock();
+                writer.write_string_at(0, 0, "=== VEROS DYNAMIC SYSTEM MONITOR ===");
+                let time_str = alloc::format!("Live RTC Time : {:02}:{:02}:{:02} UTC       ", h, m, s);
+                writer.write_string_at(2, 0, &time_str);
+                let mem_str = alloc::format!("Heap Memory   : {} bytes used / {} total    ", used, crate::allocator::HEAP_SIZE);
+                writer.write_string_at(3, 0, &mem_str);
+                let tick_str = alloc::format!("System Ticks  : {} (Timer Muted)       ", ticks);
+                writer.write_string_at(4, 0, &tick_str);
+                writer.write_string_at(6, 0, "Press 'q' to exit.              ");
+                drop(writer);
+
+                let mut exit = false;
+                for _ in 0..5_000_000 {
+                    if let Some('q') = try_read_char() {
+                        exit = true;
+                        break;
+                    }
+                    core::hint::spin_loop();
+                }
+                if exit {
+                    crate::vga_buffer::WRITER.lock().clear_screen();
+                    break;
+                }
+            }
+        }
         "clock" => {
             let mut addr_port = Port::<u8>::new(0x70);
             let mut data_port = Port::<u8>::new(0x71);
@@ -184,7 +308,6 @@ fn process_command(cmd: &str) {
                 addr_port.write(0x04); let h = data_port.read();
                 addr_port.write(0x02); let m = data_port.read();
                 addr_port.write(0x00); let s = data_port.read();
-                
                 let h = (h & 0x0F) + ((h >> 4) * 10);
                 let m = (m & 0x0F) + ((m >> 4) * 10);
                 let s = (s & 0x0F) + ((s >> 4) * 10);
@@ -214,7 +337,6 @@ fn process_command(cmd: &str) {
             }
         }
         _ => {
-            // Check for variable assignment `x = 10`
             if let Some(idx) = cmd.find('=') {
                 let var = cmd[..idx].trim().to_lowercase();
                 let val_str = cmd[idx+1..].trim();
