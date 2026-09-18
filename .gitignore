@@ -1,0 +1,5 @@
+/target/
+/vendor/
+**/*.rs.bk
+*.swp
+.DS_Store
