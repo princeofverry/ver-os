@@ -1,5 +1,14 @@
 # Veros (Verry OS)
 
+```text
+ __      __        ____   _____
+ \ \    / /       / __ \ / ____|
+  \ \  / /__ _ __| |  | | (___
+   \ \/ / _ \ '__| |  | |\___ \
+    \  /  __/ |  | |__| |____) |
+     \/ \___|_|   \____/|_____/
+```
+
 Veros is a bare-metal 64-bit educational operating system written entirely in Rust. It was built from scratch to demonstrate low-level OS concepts such as VGA text buffering, hardware interrupts, dynamic memory allocation, and interactive command-line evaluation.
 
 ## Features
