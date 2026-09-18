@@ -1,4 +1,15 @@
 use alloc::vec::Vec;
+use alloc::string::String;
+use spin::Mutex;
+use lazy_static::lazy_static;
+
+lazy_static! {
+    pub static ref VARIABLES: Mutex<alloc::collections::BTreeMap<String, i64>> = Mutex::new(alloc::collections::BTreeMap::new());
+}
+
+pub fn set_var(name: String, val: i64) {
+    VARIABLES.lock().insert(name, val);
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Token {
@@ -36,6 +47,18 @@ fn tokenize(input: &str) -> Result<Vec<Token>, &'static str> {
                     num = num * 10 + (chars.next().unwrap() as i64 - '0' as i64);
                 }
                 tokens.push(Token::Number(num));
+            },
+            'a'..='z' | 'A'..='Z' => {
+                let mut name = String::new();
+                while let Some(&c) = chars.peek() {
+                    if c.is_ascii_alphanumeric() {
+                        name.push(chars.next().unwrap());
+                    } else {
+                        break;
+                    }
+                }
+                let val = VARIABLES.lock().get(&name.to_lowercase()).copied().unwrap_or(0);
+                tokens.push(Token::Number(val));
             },
             _ => return Err("Invalid character in expression"),
         }

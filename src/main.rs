@@ -18,11 +18,24 @@ use bootloader::{BootInfo, entry_point};
 entry_point!(kernel_main);
 
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
+    println!(r#"
+ __      __        ____   _____
+ \ \    / /       / __ \ / ____|
+  \ \  / /__ _ __| |  | | (___
+   \ \/ / _ \ '__| |  | |\___ \
+    \  /  __/ |  | |__| |____) |
+     \/ \___|_|   \____/|_____/
+    "#);
     println!("Welcome to Veros!");
 
     gdt::init();
     interrupts::init_idt();
-    unsafe { interrupts::PICS.lock().initialize() };
+    unsafe { 
+        let mut pics = interrupts::PICS.lock();
+        pics.initialize();
+        // Unmask IRQ1 (Keyboard) ONLY. Mask IRQ0 (Timer) to prevent freezes.
+        pics.write_masks(0b1111_1111, 0b1111_1111);
+    }
     x86_64::instructions::interrupts::enable();
 
     use x86_64::VirtAddr;
@@ -38,7 +51,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
     println!("It did not crash!");
 
     // Start the shell
-    crate::shell::run();
+    crate::println!("Calling run..."); crate::shell::run();
 }
 
 #[alloc_error_handler]

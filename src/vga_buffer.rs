@@ -22,7 +22,7 @@ pub enum Color {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
-struct ColorCode(u8);
+pub struct ColorCode(u8);
 
 impl ColorCode {
     fn new(foreground: Color, background: Color) -> ColorCode {
@@ -110,6 +110,10 @@ impl Writer {
         for row in 0..BUFFER_HEIGHT {
             self.clear_row(row);
         }
+    }
+
+    pub fn set_color(&mut self, foreground: Color, background: Color) {
+        self.color_code = ColorCode::new(foreground, background);
     }
 
     pub fn backspace(&mut self) {

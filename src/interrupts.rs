@@ -48,7 +48,7 @@ pub static TICKS: AtomicUsize = AtomicUsize::new(0);
 extern "x86-interrupt" fn timer_interrupt_handler(_stack_frame: InterruptStackFrame) {
     TICKS.fetch_add(1, Ordering::Relaxed);
     unsafe {
-        PICS.lock().notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
+        // PICS.lock().notify_end_of_interrupt(InterruptIndex::Timer.as_u8());
     }
 }
 
@@ -89,14 +89,14 @@ impl KeyboardBuffer {
 pub static KEYBOARD_QUEUE: Mutex<KeyboardBuffer> = Mutex::new(KeyboardBuffer::new());
 
 lazy_static! {
-    static ref KEYBOARD: Mutex<Keyboard<layouts::Us104Key, ScancodeSet1>> =
+    pub static ref KEYBOARD: Mutex<Keyboard<layouts::Us104Key, ScancodeSet1>> =
         Mutex::new(Keyboard::new(layouts::Us104Key, ScancodeSet1, HandleControl::Ignore));
 }
 
 extern "x86-interrupt" fn keyboard_interrupt_handler(_stack_frame: InterruptStackFrame) {
     use x86_64::instructions::port::Port;
 
-    let mut port = Port::new(0x60);
+    crate::print!("k"); let mut port = Port::new(0x60);
     let scancode: u8 = unsafe { port.read() };
 
     let mut keyboard = KEYBOARD.lock();
