@@ -63,6 +63,18 @@ pub fn read_line() -> String {
     }
 }
 
+pub fn read_serial_line() -> String {
+    let mut buf = String::new();
+    loop {
+        let mut serial = crate::serial::SERIAL1.lock();
+        let c = serial.receive() as char;
+        drop(serial);
+        if c == '\n' { break; }
+        if c != '\r' { buf.push(c); }
+    }
+    buf
+}
+
 pub fn run() -> ! {
     println!("Type 'help' for a list of commands.");
     print!("> ");
@@ -105,6 +117,7 @@ fn process_command(cmd: &str) {
             println!("  guess     - Play number guessing game");
             println!("  tictactoe - Play Tic-Tac-Toe");
             println!("  cpuinfo   - Show CPU Vendor String");
+            println!("  weather   - Fetch real-time weather via Serial Proxy");
             println!("  reboot    - Reboot the system");
         }
         "clear" => {
@@ -205,6 +218,17 @@ fn process_command(cmd: &str) {
                     println!("File not found.");
                 }
             }
+        }
+        "weather" => {
+            println!("Connecting to Host Modem via COM1...");
+            {
+                let mut serial = crate::serial::SERIAL1.lock();
+                use core::fmt::Write;
+                serial.write_str("WEATHER\n").unwrap();
+            }
+            println!("Waiting for weather data from Internet...");
+            let response = read_serial_line();
+            println!("Host says: {}", response);
         }
         "guess" => {
             println!("Guess the number (1-100)!");

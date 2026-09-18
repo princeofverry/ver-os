@@ -10,6 +10,7 @@ mod gdt;
 mod interrupts;
 mod memory;
 mod allocator;
+pub mod serial;
 pub mod shell;
 pub mod calculator;
 use core::panic::PanicInfo;
