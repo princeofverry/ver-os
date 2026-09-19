@@ -1,4 +1,5 @@
 use alloc::string::String;
+use alloc::vec::Vec;
 use crate::{print, println, calculator, interrupts};
 use x86_64::instructions::port::Port;
 use crate::vga_buffer::Color;
@@ -9,7 +10,7 @@ pub struct File {
 }
 
 lazy_static::lazy_static! {
-    pub static ref VFS: spin::Mutex<alloc::vec::Vec<File>> = spin::Mutex::new(alloc::vec::Vec::new());
+    pub static ref VFS: spin::Mutex<Vec<File>> = spin::Mutex::new(Vec::new());
 }
 
 fn try_read_char() -> Option<char> {
@@ -35,8 +36,48 @@ fn try_read_char() -> Option<char> {
     None
 }
 
+pub fn get_rtc_time() -> (u8, u8, u8) {
+    let mut addr_port = Port::<u8>::new(0x70);
+    let mut data_port = Port::<u8>::new(0x71);
+    unsafe {
+        loop {
+            addr_port.write(0x0A);
+            if (data_port.read() & 0x80) == 0 {
+                break;
+            }
+            core::hint::spin_loop();
+        }
+
+        addr_port.write(0x00); let mut s = data_port.read();
+        addr_port.write(0x02); let mut m = data_port.read();
+        addr_port.write(0x04); let mut h = data_port.read();
+
+        addr_port.write(0x0B); let reg_b = data_port.read();
+        if (reg_b & 0x04) == 0 {
+            s = (s & 0x0F) + ((s >> 4) * 10);
+            m = (m & 0x0F) + ((m >> 4) * 10);
+            h = (h & 0x0F) + ((h >> 4) * 10);
+        }
+        h = (h + 7) % 24;
+        (h, m, s)
+    }
+}
+
+pub fn update_top_clock() {
+    static mut LAST_SEC: u8 = 255;
+    let (h, m, s) = get_rtc_time();
+    unsafe {
+        if s != LAST_SEC {
+            LAST_SEC = s;
+            let time_str = alloc::format!("[ {:02}:{:02}:{:02} WIB ]", h, m, s);
+            crate::vga_buffer::WRITER.lock().write_string_at(0, 60, &time_str);
+        }
+    }
+}
+
 fn read_char() -> char {
     loop {
+        update_top_clock();
         if let Some(c) = try_read_char() {
             return c;
         }
@@ -76,6 +117,7 @@ pub fn read_serial_line() -> String {
 }
 
 pub fn run() -> ! {
+    update_top_clock();
     println!("Type 'help' for a list of commands.");
     print!("> ");
     
@@ -84,6 +126,121 @@ pub fn run() -> ! {
         process_command(&cmd);
         print!("> ");
     }
+}
+
+fn play_snake() {
+    let mut writer = crate::vga_buffer::WRITER.lock();
+    writer.clear_screen();
+    drop(writer);
+
+    let arena_width: i32 = 30;
+    let arena_height: i32 = 18;
+    let offset_x: usize = 25;
+    let offset_y: usize = 3;
+
+    let mut snake: Vec<(i32, i32)> = alloc::vec![(15, 9), (14, 9), (13, 9)];
+    let mut dir: (i32, i32) = (1, 0);
+    let mut food: (i32, i32) = (20, 9);
+    let mut score: u32 = 0;
+    let mut rng_state: u32 = {
+        let (h, m, s) = get_rtc_time();
+        (h as u32 * 3600 + m as u32 * 60 + s as u32) ^ 0xDEADBEEF
+    };
+
+    let mut rand_next = |max: i32| -> i32 {
+        rng_state = rng_state.wrapping_mul(1103515245).wrapping_add(12345);
+        let val = (rng_state / 65536) % 32768;
+        ((val as i32) % max).abs()
+    };
+
+    // Draw borders and header
+    {
+        let mut writer = crate::vga_buffer::WRITER.lock();
+        writer.write_string_at(offset_y - 2, offset_x, "=== VEROS RETRO SNAKE ===");
+        let score_str = alloc::format!("Score: {} | Controls: WASD, Q to Quit", score);
+        writer.write_string_at(offset_y - 1, offset_x, &score_str);
+
+        for x in 0..(arena_width + 2) {
+            writer.write_string_at(offset_y, offset_x + x as usize, "#");
+            writer.write_string_at(offset_y + arena_height as usize + 1, offset_x + x as usize, "#");
+        }
+        for y in 0..(arena_height + 2) {
+            writer.write_string_at(offset_y + y as usize, offset_x, "#");
+            writer.write_string_at(offset_y + y as usize, offset_x + arena_width as usize + 1, "#");
+        }
+    }
+
+    loop {
+        let mut key = None;
+        for _ in 0..120_000 {
+            if let Some(c) = try_read_char() {
+                key = Some(c);
+            }
+            core::hint::spin_loop();
+        }
+
+        if let Some(c) = key {
+            match c {
+                'w' | 'W' => if dir.1 != 1 { dir = (0, -1); },
+                's' | 'S' => if dir.1 != -1 { dir = (0, 1); },
+                'a' | 'A' => if dir.0 != 1 { dir = (-1, 0); },
+                'd' | 'D' => if dir.0 != -1 { dir = (1, 0); },
+                'q' | 'Q' => break,
+                _ => {}
+            }
+        }
+
+        let head = snake[0];
+        let new_head = (head.0 + dir.0, head.1 + dir.1);
+
+        if new_head.0 < 0 || new_head.0 >= arena_width || new_head.1 < 0 || new_head.1 >= arena_height {
+            break;
+        }
+
+        if snake.contains(&new_head) {
+            break;
+        }
+
+        snake.insert(0, new_head);
+
+        if new_head == food {
+            score += 10;
+            loop {
+                let fx = rand_next(arena_width);
+                let fy = rand_next(arena_height);
+                if !snake.contains(&(fx, fy)) {
+                    food = (fx, fy);
+                    break;
+                }
+            }
+            let mut writer = crate::vga_buffer::WRITER.lock();
+            let score_str = alloc::format!("Score: {} | Controls: WASD, Q to Quit", score);
+            writer.write_string_at(offset_y - 1, offset_x, &score_str);
+        } else {
+            let tail = snake.pop().unwrap();
+            let mut writer = crate::vga_buffer::WRITER.lock();
+            writer.write_string_at(offset_y + 1 + tail.1 as usize, offset_x + 1 + tail.0 as usize, " ");
+        }
+
+        {
+            let mut writer = crate::vga_buffer::WRITER.lock();
+            writer.write_string_at(offset_y + 1 + new_head.1 as usize, offset_x + 1 + new_head.0 as usize, "@");
+            if snake.len() > 1 {
+                let body = snake[1];
+                writer.write_string_at(offset_y + 1 + body.1 as usize, offset_x + 1 + body.0 as usize, "O");
+            }
+            writer.write_string_at(offset_y + 1 + food.1 as usize, offset_x + 1 + food.0 as usize, "*");
+        }
+    }
+
+    let mut writer = crate::vga_buffer::WRITER.lock();
+    writer.write_string_at(offset_y + arena_height as usize / 2, offset_x + 6, "=== GAME OVER ===");
+    let final_str = alloc::format!("Final Score: {} - Press any key", score);
+    writer.write_string_at(offset_y + arena_height as usize / 2 + 1, offset_x + 3, &final_str);
+    drop(writer);
+
+    let _ = read_char();
+    crate::vga_buffer::WRITER.lock().clear_screen();
 }
 
 fn process_command(cmd: &str) {
@@ -114,6 +271,7 @@ fn process_command(cmd: &str) {
             println!("  write ... - Append to file (write <name> <content>)");
             println!("  rm ...    - Delete file");
             println!("  color ... - Change theme (matrix, ocean, default)");
+            println!("  snake     - Play Retro Snake game");
             println!("  guess     - Play number guessing game");
             println!("  tictactoe - Play Tic-Tac-Toe");
             println!("  cpuinfo   - Show CPU Vendor String");
@@ -283,60 +441,40 @@ fn process_command(cmd: &str) {
                 }
             }
         }
+        "snake" => {
+            play_snake();
+        }
         "top" => {
             crate::vga_buffer::WRITER.lock().clear_screen();
+            let mut last_s = 255;
             loop {
-                let mut addr_port = Port::<u8>::new(0x70);
-                let mut data_port = Port::<u8>::new(0x71);
-                let (h, m, s) = unsafe {
-                    addr_port.write(0x04); let h = data_port.read();
-                    addr_port.write(0x02); let m = data_port.read();
-                    addr_port.write(0x00); let s = data_port.read();
-                    let h = (h & 0x0F) + ((h >> 4) * 10);
-                    let m = (m & 0x0F) + ((m >> 4) * 10);
-                    let s = (s & 0x0F) + ((s >> 4) * 10);
-                    (h, m, s)
-                };
-                let used = crate::allocator::HEAP_SIZE - crate::allocator::ALLOCATOR.lock().free();
-                let ticks = interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
-                
-                let mut writer = crate::vga_buffer::WRITER.lock();
-                writer.write_string_at(0, 0, "=== VEROS DYNAMIC SYSTEM MONITOR ===");
-                let time_str = alloc::format!("Live RTC Time : {:02}:{:02}:{:02} UTC       ", h, m, s);
-                writer.write_string_at(2, 0, &time_str);
-                let mem_str = alloc::format!("Heap Memory   : {} bytes used / {} total    ", used, crate::allocator::HEAP_SIZE);
-                writer.write_string_at(3, 0, &mem_str);
-                let tick_str = alloc::format!("System Ticks  : {} (Timer Muted)       ", ticks);
-                writer.write_string_at(4, 0, &tick_str);
-                writer.write_string_at(6, 0, "Press 'q' to exit.              ");
-                drop(writer);
-
-                let mut exit = false;
-                for _ in 0..5_000_000 {
-                    if let Some('q') = try_read_char() {
-                        exit = true;
-                        break;
-                    }
-                    core::hint::spin_loop();
+                let (h, m, s) = get_rtc_time();
+                if s != last_s {
+                    last_s = s;
+                    let used = crate::allocator::HEAP_SIZE - crate::allocator::ALLOCATOR.lock().free();
+                    let ticks = interrupts::TICKS.load(core::sync::atomic::Ordering::Relaxed);
+                    
+                    let mut writer = crate::vga_buffer::WRITER.lock();
+                    writer.write_string_at(0, 0, "=== VEROS DYNAMIC SYSTEM MONITOR ===");
+                    let time_str = alloc::format!("Live RTC Time : {:02}:{:02}:{:02} WIB       ", h, m, s);
+                    writer.write_string_at(2, 0, &time_str);
+                    let mem_str = alloc::format!("Heap Memory   : {} bytes used / {} total    ", used, crate::allocator::HEAP_SIZE);
+                    writer.write_string_at(3, 0, &mem_str);
+                    let tick_str = alloc::format!("System Ticks  : {} (Timer Muted)       ", ticks);
+                    writer.write_string_at(4, 0, &tick_str);
+                    writer.write_string_at(6, 0, "Press 'q' to exit.              ");
                 }
-                if exit {
+
+                if let Some('q') = try_read_char() {
                     crate::vga_buffer::WRITER.lock().clear_screen();
                     break;
                 }
+                core::hint::spin_loop();
             }
         }
         "clock" => {
-            let mut addr_port = Port::<u8>::new(0x70);
-            let mut data_port = Port::<u8>::new(0x71);
-            unsafe {
-                addr_port.write(0x04); let h = data_port.read();
-                addr_port.write(0x02); let m = data_port.read();
-                addr_port.write(0x00); let s = data_port.read();
-                let h = (h & 0x0F) + ((h >> 4) * 10);
-                let m = (m & 0x0F) + ((m >> 4) * 10);
-                let s = (s & 0x0F) + ((s >> 4) * 10);
-                println!("RTC Time: {:02}:{:02}:{:02} UTC", h, m, s);
-            }
+            let (h, m, s) = get_rtc_time();
+            println!("RTC Time: {:02}:{:02}:{:02} WIB", h, m, s);
         }
         "cpuinfo" => {
             let cpuid = unsafe { core::arch::x86_64::__cpuid(0) };
